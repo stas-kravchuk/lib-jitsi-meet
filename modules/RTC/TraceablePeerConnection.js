@@ -10,15 +10,15 @@ import RTCEvents from '../../service/RTC/RTCEvents';
 import * as SignalingEvents from '../../service/RTC/SignalingEvents';
 import * as VideoType from '../../service/RTC/VideoType';
 import browser from '../browser';
+import LocalSdpMunger from '../sdp/LocalSdpMunger';
+import RtxModifier from '../sdp/RtxModifier';
+import SDP from '../sdp/SDP';
+import SDPUtil from '../sdp/SDPUtil';
+import SdpConsistency from '../sdp/SdpConsistency';
+import { SdpTransformWrap } from '../sdp/SdpTransformUtil';
 import * as GlobalOnErrorHandler from '../util/GlobalOnErrorHandler';
-import RtxModifier from '../xmpp/RtxModifier';
-import SDP from '../xmpp/SDP';
-import SDPUtil from '../xmpp/SDPUtil';
-import SdpConsistency from '../xmpp/SdpConsistency';
-import { SdpTransformWrap } from '../xmpp/SdpTransformUtil';
 
 import JitsiRemoteTrack from './JitsiRemoteTrack';
-import LocalSdpMunger from './LocalSdpMunger';
 import RTC from './RTC';
 import RTCUtils from './RTCUtils';
 import { SIM_LAYER_RIDS, TPCUtils } from './TPCUtils';
@@ -355,9 +355,8 @@ export default function TraceablePeerConnection(
 
     if (this.maxstats) {
         this.statsinterval = window.setInterval(() => {
-            this.getStats(stats => {
-                if (stats.result
-                    && typeof stats.result === 'function') {
+            this.getStats().then(stats => {
+                if (typeof stats?.result === 'function') {
                     const results = stats.result();
 
                     for (let i = 0; i < results.length; ++i) {
@@ -902,7 +901,7 @@ TraceablePeerConnection.prototype._remoteTrackAdded = function(stream, track, tr
         return;
     }
 
-    logger.log(`${this} associated ssrc`, ownerEndpointId, trackSsrc);
+    logger.log(`${this} associated ssrc:${trackSsrc} to endpoint:${ownerEndpointId}`);
 
     const peerMediaInfo
         = this.signalingLayer.getPeerMediaInfo(ownerEndpointId, mediaType);
@@ -1688,9 +1687,14 @@ TraceablePeerConnection.prototype.addTrack = function(track, isInitiator = false
 
     this.localTracks.set(rtcId, track);
 
-    // For p2p unified case, use addTransceiver API to add the tracks on the peerconnection.
-    if (browser.usesUnifiedPlan() && this.isP2P) {
-        this.tpcUtils.addTrack(track, isInitiator);
+    if (browser.usesUnifiedPlan()) {
+        try {
+            this.tpcUtils.addTrack(track, isInitiator);
+        } catch (error) {
+            logger.error(`Adding ${track} failed on ${this}: ${error?.message}`);
+
+            return Promise.reject(error);
+        }
     } else {
         // In all other cases, i.e., plan-b and unified plan bridge case, use addStream API to
         // add the track to the peerconnection.
@@ -1710,8 +1714,7 @@ TraceablePeerConnection.prototype.addTrack = function(track, isInitiator = false
         }
 
         // Muted video tracks do not have WebRTC stream
-        if (browser.usesPlanB() && browser.doesVideoMuteByStreamRemove()
-                && track.isVideoTrack() && track.isMuted()) {
+        if (browser.doesVideoMuteByStreamRemove() && track.isVideoTrack() && track.isMuted()) {
             const ssrcInfo = this.generateNewStreamSSRCInfo(track);
 
             this.sdpConsistency.setPrimarySsrc(ssrcInfo.ssrcs[0]);
@@ -1738,12 +1741,11 @@ TraceablePeerConnection.prototype.addTrack = function(track, isInitiator = false
             }
         }
     }
-
     let promiseChain = Promise.resolve();
 
     // On Firefox, the encodings have to be configured on the sender only after the transceiver is created.
     if (browser.isFirefox()) {
-        promiseChain = this.tpcUtils.setEncodings(track);
+        promiseChain = promiseChain.then(() => this.tpcUtils.setEncodings(track));
     }
 
     return promiseChain;
@@ -2899,23 +2901,11 @@ TraceablePeerConnection.prototype._processLocalSSRCsMap = function(ssrcMap) {
 
             // eslint-disable-next-line no-negated-condition
             if (newSSRCNum !== oldSSRCNum) {
-                if (oldSSRCNum === null) {
-                    logger.info(
-                        `Storing new local SSRC for ${track} in ${this}`,
-                        newSSRC);
-                } else {
-                    logger.error(
-                        `Overwriting SSRC for ${track} ${trackMSID} in ${this
-                        } with: `, newSSRC);
+                if (!oldSSRCNum) {
+                    logger.error(`Overwriting SSRC for ${track} ${trackMSID} in ${this} with: `, newSSRC);
                 }
                 this.localSSRCs.set(track.rtcId, newSSRC);
-
-                this.eventEmitter.emit(
-                    RTCEvents.LOCAL_TRACK_SSRC_UPDATED, track, newSSRCNum);
-            } else {
-                logger.debug(
-                    `The local SSRC(${newSSRCNum}) for ${track} ${trackMSID}`
-                     + `is still up to date in ${this}`);
+                this.eventEmitter.emit(RTCEvents.LOCAL_TRACK_SSRC_UPDATED, track, newSSRCNum);
             }
         } else if (!track.isVideoTrack() && !track.isMuted()) {
             // It is normal to find no SSRCs for a muted video track in
@@ -2957,13 +2947,11 @@ TraceablePeerConnection.prototype.getActiveSimulcastStreams = function() {
 /**
  * Obtains call-related stats from the peer connection.
  *
- * @param {Function} callback - The function to invoke after successfully obtaining stats.
- * @param {Function} errback - The function to invoke after failing to obtain stats.
- * @returns {void}
+ * @returns {Promise<Object>} Promise which resolves with data providing statistics about
+ * the peerconnection.
  */
-TraceablePeerConnection.prototype.getStats = function(callback, errback) {
-    // eslint-disable-next-line no-empty-function
-    this.peerconnection.getStats().then(callback, errback || (() => {}));
+TraceablePeerConnection.prototype.getStats = function() {
+    return this.peerconnection.getStats();
 };
 
 /**
@@ -3033,5 +3021,5 @@ TraceablePeerConnection.prototype.generateNewStreamSSRCInfo = function(track) {
  * @return {string}
  */
 TraceablePeerConnection.prototype.toString = function() {
-    return `TPC[${this.id},p2p:${this.isP2P}]`;
+    return `TPC[${this.id},${this.isP2P ? 'P2P' : 'JVB'}]`;
 };

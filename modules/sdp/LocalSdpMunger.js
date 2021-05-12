@@ -3,7 +3,8 @@
 import { getLogger } from 'jitsi-meet-logger';
 
 import * as MediaType from '../../service/RTC/MediaType';
-import { SdpTransformWrap } from '../xmpp/SdpTransformUtil';
+
+import { SdpTransformWrap } from './SdpTransformUtil';
 
 const logger = getLogger(__filename);
 
@@ -76,12 +77,6 @@ export default class LocalSdpMunger {
                 = mediaStream && this.tpc.isMediaStreamInPc(mediaStream);
             const shouldFakeSdp = muted || !isInPeerConnection;
 
-            logger.debug(
-                `${this.tpc} ${videoTrack} muted: ${
-                    muted}, is in PeerConnection: ${
-                    isInPeerConnection} => should fake sdp ? : ${
-                    shouldFakeSdp}`);
-
             if (!shouldFakeSdp) {
                 continue; // eslint-disable-line no-continue
             }
@@ -93,8 +88,7 @@ export default class LocalSdpMunger {
                     : [ this.tpc.sdpConsistency.cachedPrimarySsrc ];
 
             if (!requiredSSRCs.length) {
-                logger.error(
-                    `No SSRCs stored for: ${videoTrack} in ${this.tpc}`);
+                logger.error(`No SSRCs stored for: ${videoTrack} in ${this.tpc}`);
 
                 continue; // eslint-disable-line no-continue
             }
@@ -121,9 +115,6 @@ export default class LocalSdpMunger {
                 videoMLine.removeSSRC(ssrcNum);
 
                 // Inject
-                logger.debug(
-                    `${this.tpc} injecting video SSRC: ${ssrcNum} for ${
-                        videoTrack}`);
                 videoMLine.addSSRCAttribute({
                     id: ssrcNum,
                     attribute: 'cname',
@@ -143,9 +134,6 @@ export default class LocalSdpMunger {
 
                 if (!videoMLine.findGroup(group.semantics, group.ssrcs)) {
                     // Inject the group
-                    logger.debug(
-                        `${this.tpc} injecting SIM group for ${videoTrack}`,
-                        group);
                     videoMLine.addSSRCGroup(group);
                 }
             }
